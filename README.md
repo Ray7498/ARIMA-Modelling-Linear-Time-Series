@@ -103,8 +103,5 @@ install_packages(required_packages)
 - The model with the lowest AIC/BIC is selected for forecasting. 
 - The forecasted future values are plotted, and a residual analysis is performed to confirm model adequacy.
 
-## License
-
-This project is open-source and licensed under the MIT License.
 
 Feel free to explore the code, contribute, or raise issues in the repository if you encounter any problems.
