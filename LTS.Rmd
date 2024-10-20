@@ -1,0 +1,345 @@
+
+# Define the list of required packages
+required_packages <- c("zoo", "tseries", "fUnitRoots", "polynom", "forecast", "car", "ellipse","readr","dplyr","lubridate")
+
+# Install the packages
+install_packages <- function(packages) {
+  for (package in packages) {
+    if (!require(package, character.only = TRUE)) {
+      install.packages(package, dependencies = TRUE)
+      library(package, character.only = TRUE)
+    }
+  }
+}
+
+# Call the function with the list of required packages
+install_packages(required_packages)
+
+install.packages("ggplot2", type="win.binary",dependencies = TRUE)
+library(ggplot2)
+
+## PART 1
+
+# Load the dataset
+file_path <- "C:/Users/ayraa/OneDrive/Desktop/LTS Project/Data/tmpZipSerieCsv15147737518361835509/valeurs_mensuelles.csv"
+data <- read.csv(file_path, skip = 3, sep=";")
+
+# Inspect the first few rows to understand the structure
+head(data)
+
+# Rename columns appropriately (assuming the data has three columns based on the sample)
+colnames(data) <- c("date", "index", "Code")
+
+# Inspect data
+head(data)
+
+# Remove the last column as it represents codes
+data <- data[1:413, 1:2]
+
+# Create data1 (after removing the last two values for the last part) and data2 (containing the values removed for the last part)
+data1 <-data[3:411,1:2]
+data2 <- data[1:2,1:2]
+data1 <- data1[nrow(data1):1,]
+data2 <- data2[nrow(data2):1,]
+
+data2
+head(data1)
+
+# Convert data in efficient types to form a time series
+date <- as.yearmon(seq(from=1990, to=2024+3/12, by=1/12 ))
+date1 <- as.yearmon(seq(from=1990, to=2024, by=1/12 ))
+date2 <- as.yearmon(seq(from=2024+1/12, to=2024+2/12, by=1/12 ))
+index1 <-zoo(as.numeric(data1$index), order.by=date1)
+index2 <-zoo(as.numeric(data2$index), order.by=date2)
+
+# Plotting the Linear Time Series of data1
+plot(index1, xlab="Years", ylab="Raw Index", type="l",lwd=2)
+
+# Adding the last two points from data2
+points(index2, col="red", pch=16)
+lines(index2, col="red", lty=2)
+index1_lp <- tail(index1,1)
+index2_fp <- head(index2, 1)
+lines(c(time(index1_lp),time(index2_fp)), c(coredata(index1_lp),coredata(index2_fp)),col="red",lty=2)
+
+# Adding Legend to plot
+legend("topright",legend=c("Index","Future Points"),col=c("black","red"),pch=c(NA,16),lty=c(1,2),bty="n")
+
+# Differentiating the series
+dindex1 <- diff(index1,1)
+plot(dindex1, xlab="Years", ylab="Raw Index", type="l")
+
+# Justification
+acf(index1)
+
+pacf(index1)
+
+summary(lm(index1~date1))
+
+adf <- adfTest(index1, lag=0, type="ct") # ADF test with constant and trend
+
+# autocorrelation tests
+Qtests <- function(series, k, fitdf=0) {
+  pvals <- apply(matrix(1:k), 1, FUN=function(l) {
+    pval <- if (l<=fitdf) NA else Box.test(series, lag=l, type="Ljung-Box", fitdf=fitdf)$p.value
+    return(c("lag"=l,"pval"=pval))
+  })
+  return(t(pvals))
+}
+
+# Since we have a monthly series, let’s test residual autocorrelation up to order 24 (2 years), without forgetting to correct the degrees of freedom of the number of regressors.
+Qtests(adf@test$lm$residuals, 24, fitdf = length(adf@test$lm$coefficients))
+
+series <- index1; kmax <- 24; adftype="ct"
+adfTest_valid <- function(series, kmax, adftype){
+  k <- 0
+  noautocorr <- 0
+  while (noautocorr==0){
+    cat(paste0("ADF with ",k," lags: residuals OK? "))
+    adf <- adfTest(series, lags=k, type=adftype)
+    pvals <- Qtests(adf@test$lm$residuals, 24, fitdf = length(adf@test$lm$coefficients))[,2]
+    if (sum(pvals<0.05,na.rm=T)==0) {
+      noautocorr <- 1; cat("OK \n")
+    } else cat("nope \n")
+    k <- k+1
+  }
+  return(adf)
+}
+adf <- adfTest_valid(index1,24,adftype="ct")
+
+# We have had to consider 14 lags on the ADF test to erase residual autocorrelation.
+adf
+
+# The unit root is not rejected at the 95% - level for the series in levels, the series is thus at least I(1). Let’s now test the unit root for the dindex1 differenciated series. The previous graph representation seems to show the absence of a constant and non zero trend. Let’s check with a regression :
+
+summary(lm(dindex1~date1[-1]))
+
+adf <- adfTest_valid(dindex1,24, adftype="nc")
+adf
+
+# The test rejects the unit root hypothesis (p-value<0.05), we will thus say that the differenciated series is ”stationary”. index1 is therfore I(1)
+#We can also verify the same by the Pierson's Test and the KPSS test
+pp.test(dindex1)
+kpss_res<-kpss.test(dindex1)
+kpss_res
+
+## PART 2
+par(mfrow=c(1,2))
+pacf(dindex1,24);acf(dindex1,24) 
+
+pmax=8;qmax=2
+
+## test function of individual statistical significance of the coefficients
+signif <- function(estim){
+coef <- estim$coef
+se <- sqrt(diag(estim$var.coef))
+t <- coef/se
+pval <- (1-pnorm(abs(t)))∗2
+return(rbind(coef,se,pval))
+}
+
+## function to estimate an ARIMA model and check its adjustment and validity
+modelchoice <- function(p,q,data=dindex1, k=24){
+  estim <- try(arima(data, c(p,0,q),optim.control=list(maxit=20000))) #maxit: The maximum number of iterations ; with intercept
+  if (class(estim)=="try-error") return(c("p"=p,"q"=q,"arsignif"=NA,"masignif"=NA,"resnocorr"=NA, "ok"=NA))
+  arsignif <- if (p==0) NA else signif(estim)[3,p]<=0.05 # last pth p value
+  masignif <- if (q==0) NA else signif(estim)[3,p+q]<=0.05 # last qth p value
+  resnocorr <- sum(Qtests(estim$residuals,24,length(estim$coef)-1)[,2]<=0.05,na.rm=T)==0 # -1 intercept
+  checks <- c(arsignif,masignif,resnocorr)
+  ok <- as.numeric(sum(checks,na.rm=T)==(3-sum(is.na(checks))))
+  return(c("p"=p,"q"=q,"arsignif"=arsignif,"masignif"=masignif,"resnocorr"=resnocorr,"ok"=ok))
+}
+
+## function to estimate and verify all the arima(p,q) with p<=pmax and q<=max
+armamodelchoice <- function(pmax,qmax){
+  pqs <- expand.grid(0:pmax,0:qmax)
+  t(apply(matrix(1:dim(pqs)[1]),1,function(row) {
+    p <- pqs[row,1]; q <- pqs[row,2]
+    cat(paste0("Computing ARMA(",p,",",q,") \n"))
+    modelchoice(p,q)
+  }))
+}
+
+armamodels <- armamodelchoice(pmax,qmax) #estime tous les arima (patienter...)
+
+
+selec <- armamodels[armamodels[,"ok"]==1&!is.na(armamodels[,"ok"]),] 
+# modeles bien ajustes et valides
+selec
+
+pqs <- apply(selec,1,function(row) list("p"=as.numeric(row[1]),"q"=as.numeric(row[2])))
+# creates a list of the p and q orders and the candidate models
+names(pqs) <- paste0("arma(",selec[,1],",",selec[,2],")") 
+# renames the elements from the list
+models <- lapply(pqs, function(pq) arima(dindex1,c(pq[["p"]],0,pq[["q"]]))) 
+# creates a list of the models
+# Compute the AIC and BIC of the candidate models
+df <- as.data.frame(t(vapply(models, function(m) c(AIC = AIC(m), BIC = BIC(m)), FUN.VALUE = numeric(2))))
+
+print(df)
+
+# Find the model with the lowest AIC
+best_aic_model <- rownames(df)[which.min(df$AIC)]
+best_aic_model_summary <- models[[best_aic_model]]
+
+# Find the model with the lowest BIC
+best_bic_model <- rownames(df)[which.min(df$BIC)]
+best_bic_model_summary <- models[[best_bic_model]]
+
+# Print the results
+cat("Model with the best AIC:", best_aic_model, "with AIC =", min(df$AIC), "\n")
+cat("Model with the best BIC:", best_bic_model, "with BIC =", min(df$BIC), "\n")
+
+# Print the summaries of the best models
+cat("\nSummary of the best AIC model:\n")
+print(summary(best_aic_model_summary))
+
+cat("\nSummary of the best BIC model:\n")
+print(summary(best_bic_model_summary))
+
+# Display the data frame for reference
+print(df)
+
+best_model<-best_bic_model
+
+# Now check the residuals of the best model
+residuals_best_aic <- checkresiduals(best_aic_model_summary)
+residuals_best_aic <- residuals(best_aic_model_summary)
+
+# Plot the residuals
+ts.plot(residuals_best_aic, main = "Residuals of the Best AIC Model", ylab = "Residuals")
+
+# Perform Ljung-Box test on the residuals for lags ranging from 1 to 24
+ljung_box_results <- sapply(1:24, function(lag) {
+  test <- Box.test(residuals_best_aic, lag = lag, type = "Ljung-Box")
+  c(statistic = test$statistic, p.value = test$p.value)
+})
+
+
+# Convert results to a data frame for better readability
+ljung_box_df <- data.frame(
+  Lag = 1:24,
+  Statistic = ljung_box_results[1, ],
+  PValue = ljung_box_results[2, ]
+)
+
+# Print Ljung-Box test results
+cat("\nLjung-Box test results for lags 1 to 24:\n")
+print(ljung_box_df)
+
+# Optionally, plot the p-values to visualize the test results
+ggplot(ljung_box_df, aes(x = Lag, y = PValue)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Ljung-Box Test P-Values", x = "Lag", y = "P-Value") +
+  geom_hline(yintercept = 0.05, linetype = "dashed", color = "red")
+
+# Function to check if an ARMA model is causal
+is_causal <- function(model) {
+  # Extract AR coefficients
+  ar_coefs <- model$coef[grep("^ar", names(model$coef))]
+  
+  # If there are no AR coefficients, the model is causal (it's essentially an MA model)
+  if (length(ar_coefs) == 0) {
+    return(TRUE)
+  }
+  
+  # Calculate the roots of the AR polynomial
+  ar_poly <- c(1, -ar_coefs)
+  roots <- polyroot(ar_poly)
+  
+  # Check if all roots are outside the unit circle
+  return(all(Mod(roots) > 1))
+}
+
+# Check causality of the best AIC model
+causal_check <- is_causal(best_aic_model_summary)
+
+# Print the causality result
+if (causal_check) {
+  cat("The best AIC model is causal.\n")
+} else {
+  cat("The best AIC model is not causal.\n")
+}
+
+# Function to plot inverse roots of AR and MA polynomials
+plot_roots <- function(model) {
+  # Extract AR and MA coefficients
+  ar_coefs <- model$coef[grep("^ar", names(model$coef))]
+  ma_coefs <- model$coef[grep("^ma", names(model$coef))]
+  
+  # Calculate roots of AR and MA polynomials
+  ar_poly <- c(1, -ar_coefs)
+  ma_poly <- c(1, ma_coefs)
+  ar_roots <- polyroot(ar_poly)
+  ma_roots <- polyroot(ma_poly)
+  
+  # Plot roots in the complex plane
+  plot(1, type = "n", xlim = c(-1.5, 1.5), ylim = c(-1.5, 1.5),
+       xlab = "Real Part", ylab = "Imaginary Part", main = "Inverse Roots of AR and MA Polynomials")
+  circle <- function(center = c(0, 0), radius = 1, npoints = 100) {
+    angles <- seq(0, 2 * pi, length.out = npoints)
+    x <- center[1] + radius * cos(angles)
+    y <- center[2] + radius * sin(angles)
+    lines(x, y)
+  }
+  circle()
+  points(1 / ar_roots, col = "blue", pch = 19)
+  points(1 / ma_roots, col = "red", pch = 19)
+  legend("topright", legend = c("AR Roots", "MA Roots"), col = c("blue", "red"), pch = 19)
+  
+  # Create a table listing AR and MA roots
+  roots_table <- data.frame(
+    AR_Roots = c(ar_roots, rep(NA, max(0, length(ma_roots) - length(ar_roots)))),
+    MA_Roots = c(ma_roots, rep(NA, max(0, length(ar_roots) - length(ma_roots))))
+  )
+  
+  return(roots_table)
+}
+
+# Plot roots and create a table for the best AIC model
+roots_table <- plot_roots(best_aic_model_summary)
+
+# Print the roots table
+cat("\nTable of AR and MA roots:\n")
+print(roots_table)
+
+ar<-arima(dindex1,c(0,0,1),include.mean=T)
+
+ar
+
+## PART 3
+
+# Forecast the next two values of the original series using the best model (ARIMA(0,1,1))
+forecast_horizon <- 2
+alpha <- 0.05 # Confidence level
+
+forecast_results <- forecast(arima(index1,c(0,1,1),include.mean=F), h = forecast_horizon, level = (1 - alpha) * 100)
+
+print(forecast_results)
+
+plot(forecast_results, xlim=c(2021,2025))
+
+# Adding the last two points from data2 to verify our predictions
+points(index2, col="red", pch=16)
+lines(index2, col="red", lty=2)
+index1_lp <- tail(index1,1)
+index2_fp <- head(index2, 1)
+lines(c(time(index1_lp),time(index2_fp)), c(coredata(index1_lp),coredata(index2_fp)),col="red",lty=2)
+
+# Adding Legend to plot
+legend("topright",legend=c("Index","Actual Future Points", "Predicted Future Points"),col=c("black","red","blue"),pch=c(NA,16,16),lty=c(1,2,2),bty="n")
+
+# Forecast the next two values of the differenced series using best model (ARIMA(0,0,1))
+
+forecast_horizon <- 2
+alpha <- 0.05 # Confidence level
+
+forecast_results <- forecast(arima(dindex1,c(0,0,1),include.mean=F), h = forecast_horizon, level = (1 - alpha) * 100)
+
+print(forecast_results)
+
+plot(forecast_results, xlim=c(2021,2025))
+lines(forecast_results$mean,col="blue")
+
+
